@@ -9,13 +9,17 @@ import (
 	"sync"
 )
 
+type ChannelIdentifier interface {
+	String() string
+}
+
 type Client struct {
 	url           string
 	logger        *slog.Logger
 	ws            *websocket.Conn
 	ctx           context.Context
 	cancel        context.CancelFunc
-	subscriptions map[ChannelIdentifier]*Subscription
+	subscriptions map[string]*Subscription
 	mutex         sync.Mutex
 }
 
@@ -28,7 +32,7 @@ type Command struct {
 
 func NewClient(ctx context.Context, url string, logger *slog.Logger) *Client {
 	subCtx, cancel := context.WithCancel(ctx)
-	return &Client{url, logger, nil, subCtx, cancel, make(map[ChannelIdentifier]*Subscription), sync.Mutex{}}
+	return &Client{url, logger, nil, subCtx, cancel, make(map[string]*Subscription), sync.Mutex{}}
 }
 
 func (a *Client) Connect() error {
@@ -72,7 +76,7 @@ func (a *Client) Connect() error {
 				}
 			case "reject_subscription":
 				a.mutex.Lock()
-				sub, ok := a.subscriptions[*ev.GetIdentifier()]
+				sub, ok := a.subscriptions[*ev.Identifier]
 				a.mutex.Unlock()
 				if !ok {
 					a.logger.Warn("received reject_subscription for unknown subscription", "identifier", ev.Identifier)
@@ -81,7 +85,7 @@ func (a *Client) Connect() error {
 				close(sub.Messages)
 			case "confirm_subscription":
 				a.mutex.Lock()
-				sub, ok := a.subscriptions[*ev.GetIdentifier()]
+				sub, ok := a.subscriptions[*ev.Identifier]
 				a.mutex.Unlock()
 				if !ok {
 					a.logger.Warn("received confirm_subscription for unknown subscription", "identifier", ev.Identifier)
@@ -89,12 +93,12 @@ func (a *Client) Connect() error {
 				}
 				sub.Subscribed = true
 			default:
-				if ev.GetIdentifier() == nil {
+				if ev.Identifier == nil {
 					a.logger.Warn("received unknown message", "ev", ev)
 					continue
 				}
 				a.mutex.Lock()
-				sub, ok := a.subscriptions[*ev.GetIdentifier()]
+				sub, ok := a.subscriptions[*ev.Identifier]
 				a.mutex.Unlock()
 				if !ok {
 					a.logger.Warn("received message for unknown subscription", "identifier", ev.Identifier)
@@ -108,30 +112,33 @@ func (a *Client) Connect() error {
 
 func (a *Client) Subscribe(identifier ChannelIdentifier) (*Subscription, error) {
 	a.mutex.Lock()
-	a.subscriptions[identifier] = &Subscription{a, identifier, false, make(chan Event, 1000)}
+	a.subscriptions[identifier.String()] = &Subscription{a, identifier, false, make(chan Event, 1000)}
 	a.mutex.Unlock()
 
+	id := identifier.String()
 	err := a.sendCommand(Command{
 		Command:    "subscribe",
-		Identifier: identifier.String(),
+		Identifier: &id,
 	})
 	if err != nil {
 		a.mutex.Lock()
-		delete(a.subscriptions, identifier)
+		delete(a.subscriptions, id)
 		a.mutex.Unlock()
 		return nil, err
 	}
-	return a.subscriptions[identifier], nil
+	return a.subscriptions[id], nil
 }
 
 func (a *Client) Unsubscribe(subscription *Subscription) error {
 	a.mutex.Lock()
-	delete(a.subscriptions, subscription.Identifier)
+	delete(a.subscriptions, subscription.Identifier.String())
 	a.mutex.Unlock()
+
+	id := subscription.Identifier.String()
 
 	return a.sendCommand(Command{
 		Command:    "unsubscribe",
-		Identifier: subscription.Identifier.String(),
+		Identifier: &id,
 	})
 }
 
@@ -146,9 +153,12 @@ func (a *Client) sendMessage(identifier ChannelIdentifier, message any) error {
 		return fmt.Errorf("error encoding command: %w", err)
 	}
 	txt := string(data)
+
+	id := identifier.String()
+
 	return a.sendCommand(Command{
 		Command:    "message",
-		Identifier: identifier.String(),
+		Identifier: &id,
 		Data:       &txt,
 	})
 }
